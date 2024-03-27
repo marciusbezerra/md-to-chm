@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QStringListModel>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -23,6 +24,8 @@ private slots:
     void on_toolButtonSelectDirDest_clicked();
 
 private:
+    QStringListModel *statusModel;
+
     void convertMdToHtml(const QString& mdFilePath, const QString& htmlFilePath);
     void saveDirectories();
     void loadDirectories();
@@ -31,5 +34,10 @@ private:
     void compileChm(const QString &hhpFilePath);
     void executeHhpAndCapture(const QString &cmd, const QString &args);
     auto changeFileExt(const QString &fileName, const QString &newExt) -> QString;
+    void createHhcFile(const QStringList &htmlFiles, const QString &hhcFilePath);
+    void addStatus(const QString &status);
+    void clearStatus();
+    QString genSimbolicToOldCharHhcCompatibility(QString realPath);
+    QString extractRealFromOldCharHhcCompatibility(QString simbolicPath);
 };
 #endif // MAINWINDOW_H

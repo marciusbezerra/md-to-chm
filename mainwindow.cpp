@@ -15,12 +15,26 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     loadDirectories();
     ui->progressBar->setValue(0);
+    statusModel = new QStringListModel(this);
+    ui->listView->setModel(statusModel);
 }
 
 MainWindow::~MainWindow()
 {
     saveDirectories();
     delete ui;
+}
+
+auto MainWindow::genSimbolicToOldCharHhcCompatibility(QString realPath) -> QString {
+    return realPath
+        .replace("#", "[_SHARP_]")
+        .replace("%", "[_PERCENT_]");
+}
+
+auto MainWindow::extractRealFromOldCharHhcCompatibility(QString simbolicPath) -> QString {
+    return simbolicPath
+        .replace("[_SHARP_]", "#")
+        .replace("[_PERCENT_]", "%");
 }
 
 void MainWindow::convertMdToHtml(const QString& mdFilePath, const QString& htmlFilePath) {
@@ -39,8 +53,6 @@ void MainWindow::convertMdToHtml(const QString& mdFilePath, const QString& htmlF
         stream << html;
         htmlFile.close();
     }
-    // QString cmd = "C:/Program Files (x86)/HTML Help Workshop/markdown2html " + mdFilePath + " > " + htmlFilePath;
-    // QProcess::execute(cmd);
 }
 
 void MainWindow::executeHhpAndCapture(const QString& cmd, const QString& args) {
@@ -53,25 +65,27 @@ void MainWindow::executeHhpAndCapture(const QString& cmd, const QString& args) {
     qDebug() << "Output: " << output;
     qDebug() << "Error: " << error;
     qDebug() << "Exit code: " << exitCode;
-    // if ( != 0) {
-    //     throw process.readAllStandardOutput();
-    // }
+    if (exitCode != 1) {
+         throw process.readAllStandardOutput();
+    }
 }
 
-void createHhcFile(const QStringList& htmlFiles, const QString& hhcFilePath) {
+void MainWindow::createHhcFile(const QStringList& htmlFiles, const QString& hhcFilePath) {
     QFile hhcFile(hhcFilePath);
     if (hhcFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&hhcFile);
+        out.setEncoding(QStringConverter::Latin1);
         out << "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML//EN\">" << Qt::endl;
         out << "<HTML>" << Qt::endl;
         out << "<HEAD>" << Qt::endl;
-        out << "<META name=\"GENERATOR\" content=\"Microsoft&reg; HTML Help Workshop 4.1\">" << Qt::endl;
+        out << R"(<META name="GENERATOR" content="Microsoft&reg; HTML Help Workshop 4.1">)" << Qt::endl;
         out << "</HEAD>" << Qt::endl;
         out << "<BODY>" << Qt::endl;
         out << "<UL>" << Qt::endl;
         foreach(const QString& htmlFile, htmlFiles) {
+            auto realHtmlFile = extractRealFromOldCharHhcCompatibility(changeFileExt(htmlFile, ""));
             out << "<LI><OBJECT type=\"text/sitemap\">" << Qt::endl;
-            out << R"(<param name="Name" value=")" << htmlFile << "\">" << Qt::endl;
+            out << R"(<param name="Name" value=")" << realHtmlFile << "\">" << Qt::endl;
             out << R"(<param name="Local" value=")" << htmlFile << "\">" << Qt::endl;
             out << "</OBJECT>" << Qt::endl;
         }
@@ -93,12 +107,12 @@ void MainWindow::createHhpFile(const QStringList& htmlFiles, const QString& hhpF
     QFile hhpFile(hhpFilename);
     if (hhpFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream stream(&hhpFile);
-        stream.setEncoding(QStringConverter::Utf8);
+        stream.setEncoding(QStringConverter::Latin1);
         stream << "[OPTIONS]" << Qt::endl;
         stream << "Compatibility=1.1 or later" << Qt::endl;
         stream << "Compiled file=" << chmFilename << Qt::endl;
         stream << "Contents file=" << hhcFilename << Qt::endl;
-        //stream << "Default topic=index.html" << Qt::endl;
+        stream << "Default topic=" << htmlFiles.first() << Qt::endl;
         stream << "Display compile progress=No" << Qt::endl;
         stream << "Full-text search=Yes" << Qt::endl;
         stream << "Language=0x416 Portuguese (Brazil)" << Qt::endl;
@@ -112,13 +126,14 @@ void MainWindow::createHhpFile(const QStringList& htmlFiles, const QString& hhpF
 }
 
 void MainWindow::compileChm(const QString& hhpFilePath) {
-    QString cmd = "C:/Program Files (x86)/HTML Help Workshop/hhc.exe";
+    QString programFilesPath = qgetenv("ProgramFiles(x86)");
+    QString cmd = programFilesPath + "/HTML Help Workshop/hhc.exe";
     executeHhpAndCapture(cmd, hhpFilePath);
 }
 
 auto MainWindow::changeFileExt(const QString& fileName, const QString& newExt) -> QString {
     QFileInfo fileInfo(fileName);
-    return fileInfo.baseName() + newExt;
+    return fileInfo.completeBaseName() + newExt;
 }
 
 void MainWindow::saveDirectories() {
@@ -135,6 +150,18 @@ void MainWindow::loadDirectories() {
     QString htmlFilesDir = settings.value("htmlFilesDir").toString();
     ui->lineEditSource->setText(mdFilesDir);
     ui->lineEditDest->setText(htmlFilesDir);
+}
+
+void MainWindow::addStatus(const QString& status) {
+    QStringList list = statusModel->stringList();
+    list << status;
+    statusModel->setStringList(list);
+    QModelIndex index = statusModel->index(list.size() - 1);
+    ui->listView->scrollTo(index);
+}
+
+void MainWindow::clearStatus() {
+    statusModel->setStringList(QStringList());
 }
 
 void MainWindow::on_pushButtonConvert_clicked()
@@ -159,8 +186,12 @@ void MainWindow::on_pushButtonConvert_clicked()
         QDir(outputDir).removeRecursively();
     }
 
+    clearStatus();
+
+    addStatus(QString("Criando a pasta de destino %1...").arg(outputDir));
     QDir().mkdir(outputDir);
 
+    addStatus(QString("Diretório de trabalho: %1").arg(outputDir));
     QDir::setCurrent(outputDir);
 
     ui->pushButtonConvert->setEnabled(false);
@@ -172,10 +203,19 @@ void MainWindow::on_pushButtonConvert_clicked()
         QStringList filters;
         filters << "*.md";
         QStringList mdFiles = mdDir.entryList(filters, QDir::Files);
+
+        if (mdFiles.isEmpty()) {
+            QMessageBox::critical(this, "Erro", "Nenhum arquivo MD encontrado na pasta de origem");
+            return;
+        }
+
+        addStatus(QString("Arquivos MD encontrados: %1").arg(mdFiles.count()));
+
         foreach(const QString& mdFile, mdFiles) {
             QString htmlFile = changeFileExt(mdFile, ".html");
-            convertMdToHtml(mdFilesDir + "/" + mdFile, outputDir + "/" + htmlFile);
+            convertMdToHtml(mdFilesDir + "/" + mdFile, outputDir + "/" + genSimbolicToOldCharHhcCompatibility(htmlFile));
             ui->statusbar->showMessage("Convertendo " + mdFile + " para " + htmlFile);
+            addStatus(QString("Convertendo %1 para %2").arg(mdFile).arg(htmlFile));
             ui-> progressBar->setValue(ui->progressBar->value() + 1);
         }
 
@@ -183,12 +223,22 @@ void MainWindow::on_pushButtonConvert_clicked()
 
         QStringList htmlFiles = htmlDir.entryList(QStringList() << "*.html", QDir::Files);
 
+        if (htmlFiles.isEmpty()) {
+            QMessageBox::critical(this, "Erro", "Nenhum arquivo HTML gerado!");
+            return;
+        }
+
         auto hhcFilename = QString("%1.%2").arg(helpName, "hhc");
         auto hhpFilename = QString("%1.%2").arg(helpName, "hhp");
         auto chmFilename = QString("%1.%2").arg(helpName, "chm");
 
+        addStatus(QString("Gerando arquivo HHC: %1").arg(hhcFilename));
         createHhcFile(htmlFiles, hhcFilename);
+
+        addStatus(QString("Gerando arquivo HHP: %1").arg(hhpFilename));
         createHhpFile(htmlFiles, hhpFilename);
+
+        addStatus("Compilando CHM...");
         compileChm(hhpFilename);
 
         if (!QFile(chmFilename).exists()) {
@@ -197,8 +247,8 @@ void MainWindow::on_pushButtonConvert_clicked()
 
         ui->statusbar->showMessage("Arquivo CHM gerado com sucesso: " + chmFilename);
         saveDirectories();
+        addStatus("Arquivo CHM gerado com sucesso: " + chmFilename);
         QMessageBox::information(this, "Sucesso", "Arquivo CHM gerado com sucesso: " + chmFilename);
-        // open chm file using default application
         QDesktopServices::openUrl(QUrl::fromLocalFile(chmFilename));
 
     } catch (std::exception& e) {
