@@ -55,6 +55,33 @@ void MainWindow::convertMdToHtml(const QString& mdFilePath, const QString& htmlF
     }
 }
 
+void MainWindow::convertMdToHtmlRecursively(const QString& mdFilesDir,
+                                            const QString& outputDir,
+                                            QStringList& htmlFiles) {
+    QDir mdDir(mdFilesDir);
+    QStringList filters;
+    filters << "*.md";
+    QStringList mdFiles = mdDir.entryList(filters, QDir::Files);
+
+    foreach(const QString& mdFile, mdFiles) {
+        QString htmlFile = changeFileExt(mdFile, ".html");
+        convertMdToHtml(mdFilesDir + "/" + mdFile, outputDir + "/" + genSimbolicToOldCharHhcCompatibility(htmlFile));
+        ui->statusbar->showMessage("Convertendo " + mdFile + " para " + htmlFile);
+        addStatus(QString("Convertendo %1 para %2").arg(mdFile, htmlFile));
+        ui-> progressBar->setValue(ui->progressBar->value() + 1);
+        auto relativePath = QDir::current().relativeFilePath(outputDir + "/" + genSimbolicToOldCharHhcCompatibility(htmlFile));
+        htmlFiles.append(relativePath);
+    }
+
+    QStringList subDirs = mdDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    foreach(const QString& subDir, subDirs) {
+        QString newMdFilesDir = mdFilesDir + "/" + subDir;
+        QString newOutputDir = outputDir + "/" + subDir;
+        QDir().mkdir(newOutputDir);
+        convertMdToHtmlRecursively(newMdFilesDir, newOutputDir, htmlFiles);
+    }
+}
+
 void MainWindow::executeHhpAndCapture(const QString& cmd, const QString& args) {
     QProcess process;
     process.start(cmd, QStringList() << args);
@@ -66,11 +93,54 @@ void MainWindow::executeHhpAndCapture(const QString& cmd, const QString& args) {
     qDebug() << "Error: " << error;
     qDebug() << "Exit code: " << exitCode;
     if (exitCode != 1) {
-         throw process.readAllStandardOutput();
+        throw std::runtime_error(QString("%1\n%2").arg(output, error).left(500).toStdString());
     }
 }
 
-void MainWindow::createHhcFile(const QStringList& htmlFiles, const QString& hhcFilePath) {
+Node MainWindow::buildTree(const QStringList& files) {
+    Node root("", "");
+    for (const QString& file : files) {
+        QStringList parts = file.split("/");
+        Node* currentNode = &root;
+        for (const QString& part : parts) {
+            bool found = false;
+            for (Node& child : currentNode->children) {
+                if (child.title == part) {
+                    currentNode = &child;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                currentNode->addChild(Node(part, file));
+                currentNode = &(currentNode->children.last());
+            }
+        }
+    }
+    return root;
+}
+
+void MainWindow::addHhcObject(Node node, QTextStream& out) {
+    QString name = extractRealFromOldCharHhcCompatibility(changeFileExt(node.title, ""));
+    QString local = node.path;
+    if (node.children.isEmpty()) {
+        out << "<LI><OBJECT type=\"text/sitemap\">" << Qt::endl;
+        out << R"(<param name="Name" value=")" << name << "\">" << Qt::endl;
+        out << R"(<param name="Local" value=")" << local << "\">" << Qt::endl;
+        out << "</OBJECT>" << Qt::endl;
+    } else {
+        out << "<LI><OBJECT type=\"text/sitemap\">" << Qt::endl;
+        out << R"(<param name="Name" value=")" << name << "\">" << Qt::endl;
+        out << "</OBJECT>" << Qt::endl;
+        out << "<UL>" << Qt::endl;
+        foreach(const Node child, node.children) {
+            addHhcObject(child, out);
+        }
+        out << "</UL>" << Qt::endl;
+    }
+}
+
+void MainWindow::createHhcFile(const Node root, const QString& hhcFilePath) {
     QFile hhcFile(hhcFilePath);
     if (hhcFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&hhcFile);
@@ -82,13 +152,9 @@ void MainWindow::createHhcFile(const QStringList& htmlFiles, const QString& hhcF
         out << "</HEAD>" << Qt::endl;
         out << "<BODY>" << Qt::endl;
         out << "<UL>" << Qt::endl;
-        foreach(const QString& htmlFile, htmlFiles) {
-            auto realHtmlFile = extractRealFromOldCharHhcCompatibility(changeFileExt(htmlFile, ""));
-            out << "<LI><OBJECT type=\"text/sitemap\">" << Qt::endl;
-            out << R"(<param name="Name" value=")" << realHtmlFile << "\">" << Qt::endl;
-            out << R"(<param name="Local" value=")" << htmlFile << "\">" << Qt::endl;
-            out << "</OBJECT>" << Qt::endl;
-        }
+
+        addHhcObject(root, out);
+
         out << "</UL>" << Qt::endl;
         out << "</BODY>" << Qt::endl;
         out << "</HTML>" << Qt::endl;
@@ -199,29 +265,11 @@ void MainWindow::on_pushButtonConvert_clicked()
         ui->progressBar->setMaximum(QDir(mdFilesDir).count() - 2);
         ui->progressBar->setValue(0);
 
-        QDir mdDir(mdFilesDir);
-        QStringList filters;
-        filters << "*.md";
-        QStringList mdFiles = mdDir.entryList(filters, QDir::Files);
+        QStringList htmlFiles;
 
-        if (mdFiles.isEmpty()) {
-            QMessageBox::critical(this, "Erro", "Nenhum arquivo MD encontrado na pasta de origem");
-            return;
-        }
+        convertMdToHtmlRecursively(mdFilesDir, outputDir, htmlFiles);
 
-        addStatus(QString("Arquivos MD encontrados: %1").arg(mdFiles.count()));
-
-        foreach(const QString& mdFile, mdFiles) {
-            QString htmlFile = changeFileExt(mdFile, ".html");
-            convertMdToHtml(mdFilesDir + "/" + mdFile, outputDir + "/" + genSimbolicToOldCharHhcCompatibility(htmlFile));
-            ui->statusbar->showMessage("Convertendo " + mdFile + " para " + htmlFile);
-            addStatus(QString("Convertendo %1 para %2").arg(mdFile).arg(htmlFile));
-            ui-> progressBar->setValue(ui->progressBar->value() + 1);
-        }
-
-        QDir htmlDir(outputDir);
-
-        QStringList htmlFiles = htmlDir.entryList(QStringList() << "*.html", QDir::Files);
+        Node root = buildTree(htmlFiles);
 
         if (htmlFiles.isEmpty()) {
             QMessageBox::critical(this, "Erro", "Nenhum arquivo HTML gerado!");
@@ -233,7 +281,7 @@ void MainWindow::on_pushButtonConvert_clicked()
         auto chmFilename = QString("%1.%2").arg(helpName, "chm");
 
         addStatus(QString("Gerando arquivo HHC: %1").arg(hhcFilename));
-        createHhcFile(htmlFiles, hhcFilename);
+        createHhcFile(root, hhcFilename);
 
         addStatus(QString("Gerando arquivo HHP: %1").arg(hhpFilename));
         createHhpFile(htmlFiles, hhpFilename);
@@ -252,8 +300,9 @@ void MainWindow::on_pushButtonConvert_clicked()
         QDesktopServices::openUrl(QUrl::fromLocalFile(chmFilename));
 
     } catch (std::exception& e) {
-        qDebug() << "Erro ao converter arquivos MD para HTML: " << e.what();
-        QMessageBox::critical(this, "Erro", "Erro ao converter arquivos MD para HTML");
+        QString error = e.what();
+        qDebug() << "Erro ao converter arquivos MD para HTML: " << error;
+        QMessageBox::critical(this, "Erro", "Erro ao converter arquivos MD para HTML: " + error);
     }
     ui->pushButtonConvert->setEnabled(true);
 }
